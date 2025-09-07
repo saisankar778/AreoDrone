@@ -33,6 +33,7 @@ export const AppProvider: FC<{children: ReactNode}> = ({ children }) => {
   // Backend API base (if not set, we keep in-memory behavior)
   const API_BASE = import.meta.env.VITE_API_BASE as string | undefined;
   const DRONE_API_BASE = import.meta.env.VITE_DRONE_API_BASE as string | undefined;
+  const VARIANT = (import.meta.env.VITE_VARIANT as 'user' | 'vendor' | 'admin' | undefined);
 
 
   const logActivity = useCallback((message: string) => {
@@ -91,8 +92,11 @@ export const AppProvider: FC<{children: ReactNode}> = ({ children }) => {
           setOrders(prev => {
             const prevOrder = prev.find(o => o.id === order.id);
             const becameDelivered = order.status === OrderStatus.DELIVERED && prevOrder?.status !== OrderStatus.DELIVERED;
-            if (becameDelivered && order.user === 'Student-1') {
-              addNotification(`Your order ${order.id} has been delivered.`, 'success');
+            const isUserView = VARIANT === 'user';
+            const shouldNotify = becameDelivered && (isUserView ? order.user === 'Student-1' : true);
+            if (shouldNotify) {
+              const msgText = isUserView ? `Your order ${order.id} has been delivered.` : `Order ${order.id} has been delivered.`;
+              addNotification(msgText, 'success');
             }
             return prev.map(o => o.id === order.id ? order : o);
           });
@@ -160,7 +164,8 @@ export const AppProvider: FC<{children: ReactNode}> = ({ children }) => {
               } else if (status === OrderStatus.DECLINED) {
                   addNotification(`Order ${orderId} was declined.`, 'error');
               } else if (status === OrderStatus.DELIVERED) {
-                  addNotification(`Your order ${orderId} has been delivered.`, 'success');
+                  const isUserView = VARIANT === 'user';
+                  addNotification(isUserView ? `Your order ${orderId} has been delivered.` : `Order ${orderId} has been delivered.`, 'success');
               }
                return { ...order, status };
           }
@@ -185,7 +190,8 @@ export const AppProvider: FC<{children: ReactNode}> = ({ children }) => {
         } else if (status === OrderStatus.DECLINED) {
           addNotification(`Order ${orderId} was declined.`, 'error');
         } else if (status === OrderStatus.DELIVERED) {
-          addNotification(`Your order ${orderId} has been delivered.`, 'success');
+          const isUserView = VARIANT === 'user';
+          addNotification(isUserView ? `Your order ${orderId} has been delivered.` : `Order ${orderId} has been delivered.`, 'success');
         }
         logActivity(`Order ${orderId} status updated to ${status}.`);
         // No local state change here; realtime WS will update. As a safety, we could optimistically update if needed.
