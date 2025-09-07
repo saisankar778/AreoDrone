@@ -13,9 +13,9 @@ export const MENU_ITEMS: MenuItem[] = [
 ];
 
 const BLOCK_COORDINATES = {
-    "A": { lat: 16.462584016312782, lon: 80.50752136420085 },
+    "A": { lat: 16.4619833645846, lon: 80.50799315633193 },
     "B": { lat: 16.460755182984183, lon: 80.50745167996868 },
-    "C": { lat: 16.464311965140684, lon: 80.50803103711354 },
+    "C": { lat: 16.462577701714427, lon: 80.50755910043569 },
 };
 
 export const DELIVERY_LOCATIONS: DeliveryLocation[] = [
