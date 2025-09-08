@@ -4,7 +4,7 @@ import { STATUS_COLORS, DRONE_STATUS_COLORS, RESTAURANTS, DELIVERY_LOCATIONS } f
 // FIX: Import UserIcon
 import { DroneIcon, UserIcon } from './Icons';
 import Map from './Map';
-import { DroneStatus } from '../types';
+import { DroneStatus, OrderStatus } from '../types';
 
 const StatsCard: React.FC<{ title: string; value: string | number, icon: React.ReactNode }> = ({ title, value, icon }) => (
     <div className="bg-gray-800 p-4 rounded-xl shadow-lg flex items-center space-x-4">
@@ -24,7 +24,7 @@ const AdminView: React.FC = () => {
     
     if (!context) return null;
 
-    const { orders, drones, activityLog, mapStyle, connectToDrone, disconnectFromDrone, commandRtl, updateDroneConnectionString, toggleMapStyle } = context;
+    const { orders, drones, activityLog, mapStyle, connectToDrone, disconnectFromDrone, commandRtl, updateDroneConnectionString, toggleMapStyle, updateOrderStatus } = context;
 
     const stats = {
         activeMissions: drones.filter(d => d.status === DroneStatus.ON_MISSION || d.status === DroneStatus.RETURNING_HOME).length,
@@ -67,7 +67,52 @@ const AdminView: React.FC = () => {
                 
                 {/* Controls & Logs Column */}
                 <div className="h-full flex flex-col gap-8">
-                     <div className="bg-gray-800 p-4 rounded-xl shadow-2xl flex-1 flex flex-col">
+                    {/* Orders Management */}
+                    <div className="bg-gray-800 p-4 rounded-xl shadow-2xl flex-1 flex flex-col">
+                        <h3 className="font-bold text-xl mb-4">Orders Management</h3>
+                        <div className="space-y-3 overflow-y-auto pr-2 flex-grow">
+                            {orders.length === 0 ? (
+                                <p className="text-gray-400">No orders yet.</p>
+                            ) : (
+                                orders.map(order => {
+                                    const droneForOrder = drones.find(d => d.id === order.droneId);
+                                    const terminalStatuses = [OrderStatus.DELIVERED, OrderStatus.DECLINED, OrderStatus.FAILED];
+                                    const canDecline = order.status === OrderStatus.PLACED;
+                                    const canCancel = !terminalStatuses.includes(order.status) && (!droneForOrder || droneForOrder.status !== DroneStatus.ON_MISSION);
+                                    return (
+                                        <div key={order.id} className="bg-gray-700/50 p-3 rounded-lg">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="flex-1">
+                                                    <p className="font-bold">{order.id}</p>
+                                                    <p className="text-xs text-gray-400">User: {order.user} • Total: ${order.total.toFixed(2)} • Items: {order.items.length}</p>
+                                                </div>
+                                                <span className={`px-2 py-0.5 text-xs font-bold rounded-full text-white ${STATUS_COLORS[order.status]}`}>{order.status}</span>
+                                            </div>
+                                            <div className="mt-3 flex items-center justify-end gap-2">
+                                                <button
+                                                    onClick={() => updateOrderStatus(order.id, OrderStatus.DECLINED)}
+                                                    disabled={!canDecline}
+                                                    className={`px-3 py-1 text-sm rounded-lg font-bold transition ${canDecline ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-gray-600 text-gray-300 cursor-not-allowed'}`}
+                                                >
+                                                    Decline
+                                                </button>
+                                                <button
+                                                    onClick={() => updateOrderStatus(order.id, OrderStatus.FAILED)}
+                                                    disabled={!canCancel}
+                                                    title={!canCancel ? 'Cannot cancel while drone is on a mission' : 'Cancel this order'}
+                                                    className={`px-3 py-1 text-sm rounded-lg font-bold transition ${canCancel ? 'bg-yellow-500 hover:bg-yellow-600 text-black' : 'bg-gray-600 text-gray-300 cursor-not-allowed'}`}
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="bg-gray-800 p-4 rounded-xl shadow-2xl flex-1 flex flex-col">
                         <h3 className="font-bold text-xl mb-4">Drone Fleet Control</h3>
                         <div className="space-y-4 overflow-y-auto pr-2 flex-grow">
                             {drones.map(drone => (
