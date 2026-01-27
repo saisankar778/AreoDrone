@@ -350,8 +350,26 @@ export const AppProvider: FC<{children: ReactNode}> = ({ children }) => {
   const disconnectFromDrone = (droneId: string) => {
     const drone = drones.find(d => d.id === droneId);
     if (!drone) return;
-    logActivity(`Disconnecting from drone ${droneId}.`);
-    setDrones(prev => prev.map(d => d.id === droneId ? { ...d, isConnected: false } : d));
+    logActivity(`Disconnecting from drone ${droneId}...`);
+    const backendUrl = `${(DRONE_API_BASE || 'http://127.0.0.1:8080')}/api/drones/${droneId}`;
+    fetch(backendUrl, {
+      method: 'DELETE',
+    })
+      .then(res => {
+        if (res.ok) return res.json();
+        return res.json().then(err => {
+          throw new Error(err.detail || `Backend disconnect failed: ${res.status}`);
+        }).catch(() => { throw new Error(`Backend disconnect failed: ${res.status}`); });
+      })
+      .then(() => {
+        setDrones(prev => prev.map(d => d.id === droneId ? { ...d, isConnected: false, status: d.status === DroneStatus.ON_MISSION ? d.status : DroneStatus.IDLE } : d));
+        addNotification(`Drone ${droneId} disconnected.`, 'info');
+        logActivity(`Drone ${droneId} disconnected.`);
+      })
+      .catch(error => {
+        addNotification(`Failed to disconnect drone ${droneId}: ${error.message}`, 'error');
+        logActivity(`Failed to disconnect drone ${droneId}: ${error.message}`);
+      });
   };
   
   const updateDroneConnectionString = (droneId: string, value: string) => {

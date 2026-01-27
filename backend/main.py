@@ -27,8 +27,8 @@ import json
 # Configuration
 BLOCK_COORDINATES = {
     "A": {"lat": 16.4619833645846, "lon": 80.50799315633193},
-    "B": {"lat": 16.460755182984183, "lon": 80.50745167996868},
-    "C": {"lat": 16.462577701714427, "lon": 80.50755910043569},
+    "B": {"lat": 16.4630291, "lon": 80.5083940},
+    "C": {"lat": 16.460789852053995, "lon": 80.50785908615744},
 }
 
 HOME_LOCATION = {"lat": 16.463000, "lon": 80.507800}
@@ -123,11 +123,54 @@ class MissionResponse(BaseModel):
 class DroneDelivery:
     def __init__(self, connection_string: str):
         self.connection_string = connection_string
-        self.vehicle = connect(connection_string, wait_ready=True)
+        # Keep a ring buffer of recent STATUSTEXT messages from the FCU for better diagnostics
+        try:
+            from collections import deque
+            self._status_texts = deque(maxlen=50)
+        except Exception:
+            self._status_texts = []
+        # Support serial device strings with optional baud, e.g. "/dev/ttyUSB0@57600"
+        try:
+            if connection_string.startswith("/dev/"):
+                conn = connection_string
+                baud = None
+                if "@" in connection_string:
+                    conn, baud_str = connection_string.split("@", 1)
+                    try:
+                        baud = int(baud_str)
+                    except ValueError:
+                        print(f"Warning: invalid baud '{baud_str}', defaulting to 57600")
+                        baud = 57600
+                else:
+                    # Sensible default for many TELEM ports
+                    baud = 57600
+                print(f"Connecting to serial device {conn} at baud {baud} ...")
+                self.vehicle = connect(
+                    conn,
+                    wait_ready=True,
+                    baud=baud,
+                    heartbeat_timeout=60,
+                )
+            else:
+                print(f"Connecting over network using '{connection_string}' ...")
+                self.vehicle = connect(
+                    connection_string,
+                    wait_ready=True,
+                    heartbeat_timeout=60,
+                )
+        except Exception as e:
+            # Re-raise to be handled by API layer
+            print(f"Connection attempt failed: {e}")
+            raise
         self.lock = threading.Lock()
         self.is_connected = True
         # Will be set at mission start from current location
         self._home_location = None  # type: Optional[LocationGlobalRelative]
+        # Setup listeners after connection
+        try:
+            self._setup_listeners()
+        except Exception as e:
+            print(f"Warning: failed to set listeners: {e}")
         # Optionally standardize WPNAV speeds for consistent behavior
         if SET_WPNAV_PARAMS:
             try:
@@ -139,12 +182,53 @@ class DroneDelivery:
             except Exception as e:
                 print(f"Warning: Failed to set WPNAV parameters: {e}")
 
+    def _setup_listeners(self):
+        """Attach useful listeners for diagnostics (e.g., STATUSTEXT)."""
+        try:
+            def _status_cb(self_v, name, message):
+                try:
+                    text = getattr(message, 'text', None)
+                    severity = getattr(message, 'severity', None)
+                    if text:
+                        entry = f"STATUSTEXT[{severity}]: {text}"
+                        if isinstance(self._status_texts, list):
+                            self._status_texts.append(entry)
+                            # Trim list to last 50
+                            if len(self._status_texts) > 50:
+                                self._status_texts = self._status_texts[-50:]
+                        else:
+                            self._status_texts.append(entry)  # deque
+                        # Also print immediately for live debugging
+                        print(entry)
+                except Exception:
+                    pass
+
+            # Add as a message listener via DroneKit
+            # Using '*' attribute listener to reduce compatibility issues across versions
+            try:
+                self.vehicle.add_message_listener('STATUSTEXT', _status_cb)
+            except Exception:
+                # Some versions expose only attribute listeners; fall back to attribute listener for system_status
+                self.vehicle.add_attribute_listener('*', _status_cb)
+        except Exception as e:
+            print(f"Listener setup error: {e}")
+
     def arm_and_takeoff(self, target_altitude: float):
         with self.lock:
-            print("Arming motors...")
+            print("Preparing to arm...")
+            # Ensure we are in GUIDED and the autopilot accepted the mode
             self.vehicle.mode = VehicleMode("GUIDED")
+            while self.vehicle.mode.name != "GUIDED":
+                print(" Waiting for mode change...")
+                time.sleep(1)
+
+            print("Arming motors...")
             self.vehicle.armed = True
-            # Lock home location to prevent changes during the mission
+            while not self.vehicle.armed:
+                print(" Waiting for arming...")
+                time.sleep(1)
+
+            # Lock home location to prevent changes during the mission (only after GPS ready)
             try:
                 print("Locking home location to prevent changes...")
                 self.vehicle.send_mavlink(self.vehicle.message_factory.command_long_encode(
@@ -158,14 +242,21 @@ class DroneDelivery:
                 print("Home position locked!")
             except Exception as e:
                 print(f"Warning: failed to lock home location: {e}")
+
+            start = time.time()
             while not self.vehicle.armed:
+                if time.time() - start > 45:
+                    recent_msgs = list(self._status_texts) if self._status_texts else []
+                    raise Exception(f"Arming timeout. Recent FCU messages: {recent_msgs[-5:]}")
                 print("Waiting for arming...")
                 time.sleep(1)
+
             print("Taking off...")
             self.vehicle.simple_takeoff(target_altitude)
             while True:
-                print(f"Altitude: {self.vehicle.location.global_relative_frame.alt}")
-                if self.vehicle.location.global_relative_frame.alt >= target_altitude * 0.95:
+                alt = getattr(self.vehicle.location.global_relative_frame, 'alt', 0)
+                print(f"Altitude: {alt}")
+                if alt >= target_altitude * 0.95:
                     print("Target altitude reached!")
                     break
                 time.sleep(1)
@@ -174,8 +265,30 @@ class DroneDelivery:
         with self.lock:
             # Save current home before leaving
             print("Saving home location...")
-            self._home_location = self.vehicle.location.global_relative_frame
+            try:
+                cur_loc = self.vehicle.location.global_relative_frame
+                self._home_location = LocationGlobalRelative(cur_loc.lat, cur_loc.lon, cur_loc.alt)
+            except Exception:
+                # Fallback attempt using global_frame
+                cur_loc = self.vehicle.location.global_frame
+                self._home_location = LocationGlobalRelative(cur_loc.lat, cur_loc.lon, 0)
             print(f"Home saved: Lat={self._home_location.lat}, Lon={self._home_location.lon}")
+
+            # Ensure we are in GUIDED mode before navigation
+            try:
+                self.vehicle.mode = VehicleMode("GUIDED")
+            except Exception as e:
+                print(f"Warning: failed to set GUIDED before navigation: {e}")
+            start = time.time()
+            while getattr(self.vehicle.mode, 'name', None) != "GUIDED" and time.time() - start < 10:
+                print(" Waiting for GUIDED mode before navigation...")
+                time.sleep(0.5)
+
+            # Also try setting desired groundspeed attribute (some DK versions ignore kwarg)
+            try:
+                self.vehicle.groundspeed = MISSION_GROUNDSPEED_MPS
+            except Exception:
+                pass
 
             # Fly to destination
             print(f"Flying to destination: Lat={lat}, Lon={lon}, Alt={cruise_alt}")
@@ -189,11 +302,41 @@ class DroneDelivery:
                 self.vehicle.simple_goto(target_location)
 
             # Wait until drone reaches the target location (simple geographic proximity)
+            last_distance = None
+            last_cmd_time = time.time()
             while True:
+                # Make sure we stay in GUIDED; some FCUs may switch modes on failsafe
+                try:
+                    if getattr(self.vehicle.mode, 'name', None) != "GUIDED":
+                        print(f"Mode changed to {getattr(self.vehicle.mode, 'name', None)} during nav; resetting to GUIDED...")
+                        self.vehicle.mode = VehicleMode("GUIDED")
+                        # brief wait, but don't block long
+                        t0 = time.time()
+                        while getattr(self.vehicle.mode, 'name', None) != "GUIDED" and time.time() - t0 < 5:
+                            time.sleep(0.2)
+                except Exception as e:
+                    print(f"Mode check error: {e}")
+
                 current_lat = self.vehicle.location.global_relative_frame.lat
                 current_lon = self.vehicle.location.global_relative_frame.lon
                 distance = ((current_lat - lat)**2 + (current_lon - lon)**2) ** 0.5
                 print(f"Current Location: Lat={current_lat}, Lon={current_lon}, Distance={distance}")
+                # If no progress, reissue the goto command periodically
+                try:
+                    if last_distance is None:
+                        last_distance = distance
+                    else:
+                        progressed = distance < (last_distance - 5e-7)
+                        if (not progressed) and (time.time() - last_cmd_time > 3):
+                            print("No movement detected, reissuing simple_goto...")
+                            try:
+                                self.vehicle.simple_goto(target_location, groundspeed=MISSION_GROUNDSPEED_MPS)
+                            except TypeError:
+                                self.vehicle.simple_goto(target_location)
+                            last_cmd_time = time.time()
+                        last_distance = distance
+                except Exception as e:
+                    print(f"Progress check error: {e}")
                 if distance < 0.00005:
                     print("Destination reached!")
                     if notify_callback:
@@ -204,14 +347,83 @@ class DroneDelivery:
                     break
                 time.sleep(1)
 
+            print("Initiating LAND at destination...")
+            self.vehicle.mode = VehicleMode("LAND")
             # Descend to landing altitude
             print(f"Descending to {final_alt}m for landing...")
-            self.vehicle.simple_goto(LocationGlobalRelative(lat, lon, final_alt))
-            while self.vehicle.location.global_relative_frame.alt > final_alt * 1.1:
-                print(f"Altitude: {self.vehicle.location.global_relative_frame.alt}")
+            descend_target = LocationGlobalRelative(lat, lon, final_alt)
+            try:
+                self.vehicle.simple_goto(descend_target)
+            except Exception as e:
+                print(f"simple_goto to descend failed initially: {e}")
+            last_alt = None
+            last_cmd_time = time.time()
+            while True:
+                alt_now = getattr(self.vehicle.location.global_relative_frame, 'alt', None)
+                if alt_now is None:
+                    print("No altitude reading; continuing...")
+                    time.sleep(1)
+                    continue
+                print(f"Altitude: {alt_now}")
+                if alt_now <= final_alt * 1.1:
+                    break
+                # Re-issue descent if no progress
+                if last_alt is not None:
+                    progressed = alt_now < (last_alt - 0.05)
+                    if (not progressed) and (time.time() - last_cmd_time > 3):
+                        print("No descent progress, reissuing simple_goto for descent...")
+                        try:
+                            self.vehicle.simple_goto(descend_target)
+                        except Exception:
+                            pass
+                        last_cmd_time = time.time()
+                last_alt = alt_now
                 time.sleep(1)
 
-            # Drop the payload via servo while still armed at low altitude for reliable actuation
+            # Land and disarm at destination first
+            print("Landing...")
+            try:
+                self.vehicle.mode = VehicleMode("LAND")
+            except Exception as e:
+                print(f"Failed to set LAND mode: {e}")
+            # Wait for LAND mode acceptance (timeout + reissue)
+            t_land = time.time()
+            while getattr(self.vehicle.mode, 'name', None) != "LAND" and time.time() - t_land < 10:
+                print(" Waiting for LAND mode acceptance...")
+                time.sleep(0.5)
+            if getattr(self.vehicle.mode, 'name', None) != "LAND":
+                print(f"LAND mode not accepted (current={getattr(self.vehicle.mode, 'name', None)}), retrying...")
+                try:
+                    self.vehicle.mode = VehicleMode("LAND")
+                except Exception:
+                    pass
+
+            # Wait for disarm, with safe fallback disarm if close to ground
+            while self.vehicle.armed:
+                try:
+                    alt_now = getattr(self.vehicle.location.global_relative_frame, 'alt', 999)
+                    gs = getattr(self.vehicle, 'groundspeed', None)
+                except Exception:
+                    alt_now, gs = 999, None
+                print("Waiting for disarm after landing...")
+                # Safe disarm fallback: near ground and (optionally) moving slowly
+                if alt_now is not None and alt_now < 0.3:
+                    try:
+                        print("Near ground; sending safe disarm command via MAVLink...")
+                        disarm_msg = self.vehicle.message_factory.command_long_encode(
+                            0, 0,
+                            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                            0,
+                            0, 0, 0, 0, 0, 0, 0
+                        )
+                        self.vehicle.send_mavlink(disarm_msg)
+                        self.vehicle.flush()
+                    except Exception as e:
+                        print(f"Failed to send disarm command: {e}")
+                time.sleep(1)
+            print("Landed and disarmed.")
+
+            # Actuate servo AFTER disarm as requested
             payload_dropped = False
             try:
                 print("Dropping payload via servo...")
@@ -222,9 +434,7 @@ class DroneDelivery:
             except Exception as e:
                 print(f"Warning: servo actuation failed: {e}")
 
-            # Land and disarm; only consider delivery complete after disarm + payload_dropped
-            print("Landing...")
-            self.vehicle.mode = VehicleMode("LAND")
+            # Now wait for touchdown and auto-disarm
             while self.vehicle.armed:
                 print("Waiting for disarm after landing...")
                 time.sleep(1)
@@ -258,22 +468,69 @@ class DroneDelivery:
                 time.sleep(1)
             print("Reached cruise altitude.")
 
-            # Return to saved home location
+            # Return to saved home location (robust navigation like outbound leg)
             if self._home_location is None:
                 print("Warning: home location not set, using current as home.")
-                self._home_location = self.vehicle.location.global_relative_frame
+                cur = self.vehicle.location.global_relative_frame
+                self._home_location = LocationGlobalRelative(cur.lat, cur.lon, cur.alt)
+
+            # Ensure GUIDED before return
+            try:
+                self.vehicle.mode = VehicleMode("GUIDED")
+            except Exception as e:
+                print(f"Warning: failed to set GUIDED before return: {e}")
+            t0 = time.time()
+            while getattr(self.vehicle.mode, 'name', None) != "GUIDED" and time.time() - t0 < 10:
+                print(" Waiting for GUIDED before return...")
+                time.sleep(0.5)
+
+            # Try setting groundspeed attribute too
+            try:
+                self.vehicle.groundspeed = MISSION_GROUNDSPEED_MPS
+            except Exception:
+                pass
+
+            home_target = LocationGlobalRelative(self._home_location.lat, self._home_location.lon, cruise_alt)
             print(f"Returning to saved home point: Lat={self._home_location.lat}, Lon={self._home_location.lon}")
             try:
-                self.vehicle.simple_goto(LocationGlobalRelative(self._home_location.lat, self._home_location.lon, cruise_alt),
-                                         groundspeed=MISSION_GROUNDSPEED_MPS)
+                self.vehicle.simple_goto(home_target, groundspeed=MISSION_GROUNDSPEED_MPS)
             except TypeError:
-                self.vehicle.simple_goto(LocationGlobalRelative(self._home_location.lat, self._home_location.lon, cruise_alt))
+                self.vehicle.simple_goto(home_target)
 
+            last_distance = None
+            last_cmd_time = time.time()
             while True:
+                # Stay in GUIDED during return
+                try:
+                    if getattr(self.vehicle.mode, 'name', None) != "GUIDED":
+                        print(f"Mode changed to {getattr(self.vehicle.mode, 'name', None)} during return; resetting to GUIDED...")
+                        self.vehicle.mode = VehicleMode("GUIDED")
+                        t1 = time.time()
+                        while getattr(self.vehicle.mode, 'name', None) != "GUIDED" and time.time() - t1 < 5:
+                            time.sleep(0.2)
+                except Exception as e:
+                    print(f"Mode check error (return): {e}")
+
                 current_lat = self.vehicle.location.global_relative_frame.lat
                 current_lon = self.vehicle.location.global_relative_frame.lon
                 distance = ((current_lat - self._home_location.lat)**2 + (current_lon - self._home_location.lon)**2) ** 0.5
                 print(f"Current Location: Lat={current_lat}, Lon={current_lon}, Distance={distance}")
+                try:
+                    if last_distance is None:
+                        last_distance = distance
+                    else:
+                        progressed = distance < (last_distance - 5e-7)
+                        if (not progressed) and (time.time() - last_cmd_time > 3):
+                            print("No movement detected on return, reissuing simple_goto...")
+                            try:
+                                self.vehicle.simple_goto(home_target, groundspeed=MISSION_GROUNDSPEED_MPS)
+                            except TypeError:
+                                self.vehicle.simple_goto(home_target)
+                            last_cmd_time = time.time()
+                        last_distance = distance
+                except Exception as e:
+                    print(f"Progress check error (return): {e}")
+
                 if distance < 0.00005:
                     print("Returned to home!")
                     break
@@ -283,7 +540,6 @@ class DroneDelivery:
             time.sleep(2)
             print("Landing at home location...")
             self.vehicle.mode = VehicleMode("LAND")
-
             while self.vehicle.armed:
                 print("Waiting for disarm after landing...")
                 time.sleep(1)
@@ -318,15 +574,21 @@ class DroneDelivery:
                 time.sleep(1)
 
     def set_servo(self, channel: int, pwm_value: int):
+        """
+        Control servo using MAV_CMD_DO_SET_SERVO
+        channel: servo output channel (e.g., 10)
+        pwm_value: PWM value (1000–2000 µs typical)
+        """
         print(f"Setting servo at channel {channel} to PWM {pwm_value}")
-        self.vehicle.send_mavlink(self.vehicle.message_factory.command_long_encode(
-            0, 0,
-            mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
-            0,
-            channel,
-            pwm_value,
-            0, 0, 0, 0, 0
-        ))
+        msg = self.vehicle.message_factory.command_long_encode(
+            0, 0,                                    # target system, target component
+            mavutil.mavlink.MAV_CMD_DO_SET_SERVO,    # command
+            0,                                       # confirmation
+            channel,                                 # servo number
+            pwm_value,                               # PWM value
+            0, 0, 0, 0, 0                            # unused params
+        )
+        self.vehicle.send_mavlink(msg)
         self.vehicle.flush()
 
     def get_status(self) -> DroneStatus:

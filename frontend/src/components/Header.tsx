@@ -39,7 +39,7 @@ const Header: React.FC<HeaderProps> = ({ currentView, setView, canSwitchViews = 
                     <div className="flex items-center">
                         <div className="flex-shrink-0 text-white flex items-center space-x-2">
                             <DroneIcon className="w-8 h-8 text-cyan-400"/>
-                            <span className="font-bold text-xl">AeroFeast</span>
+                            <span className="font-bold text-xl">SkyWorks</span>
                         </div>
                     </div>
                     {canSwitchViews && (

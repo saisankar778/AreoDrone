@@ -27,6 +27,10 @@ WORKDIR /app
 # Copy and install Python dependencies first for better layer caching
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
+ 
+ # Overwrite DroneKit with our patched file (baked into the image)
+ # Source path is relative to the backend build context (./backend)
+ COPY patches/dronekit/__init__.py /usr/local/lib/python3.10/site-packages/dronekit/__init__.py
 
 # Copy the backend application code
 COPY . .
@@ -36,3 +40,4 @@ EXPOSE 8080
 
 # Default command: run the app (main.py reads HOST/PORT envs and uses uvicorn)
 CMD ["python", "main.py"]
+

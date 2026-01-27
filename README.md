@@ -27,7 +27,7 @@ This repo also contains a FastAPI-based drone backend under `backend/` with a `D
 - Docker Engine with compose-plugin (Docker Compose v2)
 - Linux recommended (compose uses `network_mode: "host"`)
 
-### Build and Run
+### Build and Run (Linux)
 ```bash
 docker compose build backend
 docker compose up -d backend
@@ -40,6 +40,29 @@ The API will be available at: http://localhost:8080 (docs at `/docs`).
 - Use host networking (ideal for MAVLink UDP and local tooling)
 - Set `CORS_ORIGINS=*` (adjust for production)
 - Send delivery status updates to your deployed Orders API at `https://areodrone-database.onrender.com` via `ORDERS_API_BASE`.
+
+### Windows (Docker Desktop)
+Docker Desktop on Windows does not support `network_mode: "host"`. Use the provided override file `docker-compose.windows.yml`, which maps TCP 8080 and UDP 14550.
+
+Ensure the SQLite DB file exists (recommended on Windows to avoid bind-mount quirks):
+```powershell
+New-Item -Path .\backend\drone_orders.db -ItemType File -Force | Out-Null
+```
+
+Build, run, and view logs:
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.windows.yml build backend
+docker compose -f docker-compose.yml -f docker-compose.windows.yml up -d backend
+docker compose -f docker-compose.yml -f docker-compose.windows.yml logs -f backend
+```
+
+Verify the API:
+- Open http://localhost:8080/docs
+
+MAVLink UDP on Windows:
+- Configure your simulator/GCS to send MAVLink to `127.0.0.1:14550`.
+- In the Admin UI, use the connection string: `udp:0.0.0.0:14550`.
+- Ensure Windows Firewall allows inbound UDP on port 14550 (and TCP 8080 if accessed from other devices).
 
 ### Frontend → Backend URLs
 - Frontend Orders API base: set to `https://areodrone-database.onrender.com`
